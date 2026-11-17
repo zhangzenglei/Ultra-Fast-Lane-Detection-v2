@@ -98,3 +98,11 @@ year = {2020}
   doi={10.1109/TPAMI.2022.3182097}
 }
 ```
+
+source .venv/bin/activate
+
+python batch_infer_ufldv2.py \
+    --config configs/culane_res34.py \
+    --weights weights/culane_res34.pth \
+    --input /home/zenglei/Data/v6453/mcapWriter1_record_20260916-102329/sensor_camera_front_mono_image_encode/ \
+    --output ./results

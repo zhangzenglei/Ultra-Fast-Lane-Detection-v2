@@ -1,5 +1,4 @@
 import os, argparse
-from data.dali_data import TrainCollect
 from utils.dist_utils import get_rank, get_world_size, is_main_process, dist_print, DistSummaryWriter
 from utils.config import Config
 import torch
@@ -180,6 +179,7 @@ def get_model(cfg):
     return importlib.import_module('model.model_'+cfg.dataset.lower()).get_model(cfg)
 
 def get_train_loader(cfg):
+    from data.dali_data import TrainCollect
     if cfg.dataset == 'CULane':
         train_loader = TrainCollect(cfg.batch_size, 4, cfg.data_root, os.path.join(cfg.data_root, 'list/train_gt.txt'), get_rank(), get_world_size(), 
                                 cfg.row_anchor, cfg.col_anchor, cfg.train_width, cfg.train_height, cfg.num_cell_row, cfg.num_cell_col, cfg.dataset, cfg.crop_ratio)
