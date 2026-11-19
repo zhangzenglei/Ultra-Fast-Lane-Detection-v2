@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""Batch image inference for cfzd/Ultra-Fast-Lane-Detection-v2 (CULane/TuSimple).
-Run from the repository root after the two inference-only source patches in README.
-"""
+"""Batch UFLDv2 inference, optionally comparing recorded undistorted contours."""
 import argparse
 import json
 import sys
@@ -16,6 +14,10 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from utils.config import Config
+from utils.lane_comparison import (
+    CameraCalibration, RecordedContourIndex,
+    draw_comparison_legend, draw_recorded_contours,
+)
 from model.model_culane import get_model as get_culane_model
 from model.model_tusimple import get_model as get_tusimple_model
 
@@ -90,6 +92,14 @@ def load_checkpoint(path):
 
 
 def infer(args):
+    if args.recorded_contours and not args.camera_param:
+        raise ValueError("--recorded-contours requires --camera-param")
+    if args.limit is not None and args.limit <= 0:
+        raise ValueError("--limit must be positive")
+    calibration = CameraCalibration(args.camera_param) if args.camera_param else None
+    recorded_index = (RecordedContourIndex(args.recorded_contours, calibration.camera_id,
+                                           args.match_tolerance_ms)
+                      if args.recorded_contours else None)
     cfg = Config.fromfile(args.config)
     if cfg.dataset not in ("CULane", "Tusimple"):
         raise ValueError("Use a CULane or Tusimple model config")
@@ -117,14 +127,24 @@ def infer(args):
         raise FileNotFoundError(src)
     if not image_paths:
         raise RuntimeError("No images found")
+    if args.limit is not None:
+        image_paths = image_paths[:args.limit]
     done, failed, elapsed = 0, 0, 0.0
+    matched, unmatched = 0, 0
     for path in tqdm(image_paths, desc="UFLDv2"):
         try:
             with Image.open(path) as raw:
+                if calibration and raw.getexif().get(274, 1) != 1:
+                    raise ValueError("Calibrated images must not have EXIF rotation/reflection")
                 image = ImageOps.exif_transpose(raw).convert("RGB")
                 width, height = image.size
+                if calibration:
+                    image = Image.fromarray(calibration.undistort(np.asarray(image)))
+                # Inference and visualization use the same undistorted image.
                 tensor = prep(image)[:, -int(cfg.train_height):, :].unsqueeze(0).cuda()
                 vis = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR).copy()
+            recorded = (recorded_index.match(path, calibration.scale(width, height))
+                        if recorded_index else None)
             t0 = time.perf_counter()
             with torch.inference_mode():
                 output = model(tensor)
@@ -135,13 +155,16 @@ def infer(args):
                 points = lane["points"]
                 if not points:
                     continue
-                color = COLORS[lane["lane_id"]]
+                color = (0, 165, 255) if recorded is not None else COLORS[lane["lane_id"]]
                 # Dots show true sampled predictions; connect for easier review.
                 cvpts = np.asarray(points, dtype=np.int32).reshape(-1, 1, 2)
                 if len(points) >= 2:
                     cv2.polylines(vis, [cvpts], False, color, 2, cv2.LINE_AA)
                 for x, y in points:
                     cv2.circle(vis, (x, y), 3, color, -1, cv2.LINE_AA)
+            if recorded is not None:
+                draw_recorded_contours(vis, recorded)
+                draw_comparison_legend(vis, recorded)
             relative = path.relative_to(src) if src.is_dir() else Path(path.name)
             target = dst / relative.parent / (relative.stem + "_lanes.jpg")
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -150,13 +173,24 @@ def infer(args):
                 raise RuntimeError("JPEG encode failed")
             buf.tofile(str(target))
             data = {"source": str(path), "width": width, "height": height,
-                    "model_dataset": cfg.dataset, "lanes": lanes}
+                    "model_dataset": cfg.dataset, "lanes": lanes,
+                    "coordinate_space": "undistorted" if calibration else "input_image"}
+            if calibration:
+                data["calibration"] = calibration.metadata(width, height)
+            if recorded is not None:
+                data["recorded"] = recorded
             target.with_suffix(".json").write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
             done += 1
+            if recorded is not None:
+                matched += int(recorded["matched"])
+                unmatched += int(not recorded["matched"])
         except Exception as exc:
             failed += 1
             print(f"\n[FAIL] {path}: {exc}", file=sys.stderr)
     print(f"Saved {done} images + JSON under {dst}; failed={failed}; mean model inference={elapsed / max(done,1)*1000:.1f} ms/image (excludes I/O & decoding)")
+    if recorded_index:
+        print(f"Recorded contours: matched={matched}, unmatched={unmatched}; tolerance={args.match_tolerance_ms:g} ms")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
@@ -165,4 +199,9 @@ if __name__ == "__main__":
     parser.add_argument("--weights", required=True)
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
-    infer(parser.parse_args())
+    parser.add_argument("--camera-param", help="Fixed camera calibration JSON; undistort in memory")
+    parser.add_argument("--recorded-contours", help="Directory of recorded front-mono contour JSON files")
+    parser.add_argument("--match-tolerance-ms", type=float, default=1.0,
+                        help="Maximum image/contour timestamp difference (default: 1 ms)")
+    parser.add_argument("--limit", type=int, help="Process only the first N images (for a preview)")
+    sys.exit(infer(parser.parse_args()))

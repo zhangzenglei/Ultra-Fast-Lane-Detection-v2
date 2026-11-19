@@ -99,10 +99,28 @@ year = {2020}
 }
 ```
 
+# 前视图像去畸变及车道线结果对比
+
+在工程根目录运行（需要 CUDA GPU）：
+
+```bash
 source .venv/bin/activate
 
 python batch_infer_ufldv2.py \
     --config configs/culane_res34.py \
     --weights weights/culane_res34.pth \
-    --input /home/zenglei/Data/v6453/mcapWriter1_record_20260916-102329/sensor_camera_front_mono_image_encode/ \
-    --output ./results
+    --input /home/zenglei/Data/seg_j6/seg/sensor_camera_front_mono_pym_image \
+    --camera-param /home/zenglei/Data/seg_j6/seg/sensor_camera_front_mono_param/sensor_camera_front_mono_param_0.json \
+    --recorded-contours /home/zenglei/Data/seg_j6/seg/perception_calib_contour_front_mono \
+    --match-tolerance-ms 1 \
+    --output ./results/seg_j6_comparison
+```
+
+- 内参固定，只需指定一个内参 JSON。畸变系数采用 `[k1, k2, p1, p2, k3, k4, k5, k6]`，允许尾部零填充。
+- 图像必须是完整标定画面的缩放图，不能有额外裁剪或旋转。按实际分辨率缩放 K，在内存中去畸变，输出仍使用该 K，保持尺寸、不裁剪；不保存去畸变中间图。
+- 本 Topic 的录制轮廓已恢复到原图尺度，并已逐点去畸变，对应原始 K。对于 3840×2160 标定、1920×1080 输入，录制点坐标乘以 0.5 后直接叠加，不重复去畸变。
+- 图像文件名末尾为微秒时间戳，轮廓 JSON 的 `timestamp` 为毫秒。按最近时间匹配，默认容差 1 ms；未匹配帧仍输出 UFLDv2 结果，并显示 `NO MATCH`。
+- 最终 `*_lanes.jpg` 为去畸变底图，橙色表示 UFLDv2，青色采样点表示录制轮廓。录制数据的分组连接语义尚未确认，因此不跨点组连线；两套结果不按索引强制配对。
+- 同名 JSON 的 `lanes` 保存 UFLDv2 坐标，`recorded.lanes` 保存缩放后的录制坐标，两者属于同一输出图像坐标系。还保存内参、匹配状态及时间差；录制点在画面外的坐标保留在 JSON 中，绘图时跳过。
+- 录制字节解析采用已对当前目录全部文件验证的布局：小端 topic header `0x00010005`、记录数，以及每条记录的三个 `uint32` 字段和随后 `(字段 1 + 字段 2)` 对 `float32` 坐标（字段从 0 编号）。原始字段保存在 `record_header`，不推断其语义；结构异常会报告失败。
+- 可以加 `--limit 10` 先预览前 10 帧；`--input` 也支持单张图片。省略 `--camera-param` 和 `--recorded-contours` 时保留普通图像推理方式。
